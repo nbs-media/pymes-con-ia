@@ -1,0 +1,565 @@
+{
+  "name": "PYMEs con IA — WhatsApp Lead Response Agent (IMPORT TEMPLATE)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "pymesconia/whatsapp-agent/inbound",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": false
+        }
+      },
+      "id": "3bd72afd-15cf-499f-8a5b-80fe62362c37",
+      "name": "WhatsApp Inbound Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -900,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, receivedAt: new Date().toISOString() } }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "17d00dc2-877d-44b0-9d54-d9076acdb6c4",
+      "name": "Respond 200 to Meta",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        -680,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $json.body || $json;\nconst out = [];\nfor (const entry of (body.entry || [])) {\n  for (const change of (entry.changes || [])) {\n    const value = change.value || {};\n    const metadata = value.metadata || {};\n    for (const msg of (value.messages || [])) {\n      if (msg.type !== 'text') continue;\n      const text = (msg.text && msg.text.body || '').trim();\n      if (!text) continue;\n      out.push({\n        event_type: 'message', received_at: new Date().toISOString(), message_id: msg.id,\n        customer_phone: msg.from,\n        customer_name: (value.contacts || []).find(c => c.wa_id === msg.from)?.profile?.name || '',\n        message_text: text,\n        phone_number_id: metadata.phone_number_id || $env.META_PHONE_NUMBER_ID || '',\n        display_phone_number: metadata.display_phone_number || '', raw_message: msg, raw_body: body\n      });\n    }\n  }\n}\nif (!out.length) return [{ json: { event_type: 'ignored', reason: 'No inbound text messages found', received_at: new Date().toISOString() } }];\nreturn out.map(json => ({ json }));"
+      },
+      "id": "f5b585df-8a42-4b60-9803-66ea5b6b11e2",
+      "name": "Normalize Meta WhatsApp Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -680,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "is-message",
+              "leftValue": "={{ $json.event_type }}",
+              "rightValue": "message",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c6187d78-0b0f-4da3-86cb-ceaeedeaf799",
+      "name": "Only Process Text Messages",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -450,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const msg = ($json.message_text || '').toLowerCase();\nconst businessName = $env.BUSINESS_NAME || 'TU NEGOCIO';\nconst faq = [\n  { topic: 'horario', keywords: ['horario','abren','cierran','atienden'], answer: `El horario de ${businessName} es: {{EDITAR_HORARIO}}.` },\n  { topic: 'precio', keywords: ['precio','cuesta','costo','tarifa','vale'], answer: 'Los precios dependen del servicio/producto. Te puedo orientar y, si hace falta, te paso con una persona del equipo.' },\n  { topic: 'ubicacion', keywords: ['ubicación','ubicacion','dirección','direccion','donde','local'], answer: `La ubicación de ${businessName} es: {{EDITAR_DIRECCION}}.` },\n  { topic: 'agenda', keywords: ['cita','reservar','agenda','turno','consulta'], answer: 'Puedo ayudarte a avanzar. Dime qué necesitas, para cuándo y tu nombre.' },\n  { topic: 'humano', keywords: ['asesor','persona','humano','ejecutivo','llamar','llamada'], answer: 'Claro. Te paso con una persona del equipo para ayudarte mejor.' }\n];\nconst matches = faq.filter(row => row.keywords.some(k => msg.includes(k)));\nconst urgencyWords = ['urgente','hoy','ahora','emergencia','problema','queja','reclamo','cancelar','devolución','devolucion'];\nconst wantsHuman = matches.some(m => m.topic === 'humano') || urgencyWords.some(w => msg.includes(w));\nreturn [{ json: { ...$json, business_name: businessName, faq_matches: matches, faq_context: matches.map(m => `Tema: ${m.topic}\\nRespuesta base: ${m.answer}`).join('\\n\\n'), needs_owner_handoff_seed: wantsHuman } }];"
+      },
+      "id": "e6a1cf1f-44f2-4f8a-bb4a-aa83bc0bfe59",
+      "name": "Structured FAQ / Knowledge Base",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -210,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const schema = { response_text: 'Respuesta en español lista para enviar por WhatsApp. Máximo 900 caracteres.', lead_stage: 'nuevo|calificado|necesita_humano|no_fit', lead_name: 'Nombre si el cliente lo dio; si no, vacío.', lead_need: 'Necesidad principal detectada.', urgency: 'baja|media|alta', handoff_required: 'boolean', handoff_reason: 'Motivo si requiere dueño/humano.', missing_info: ['Dato que conviene pedir después'] };\nconst system = `Eres el agente de WhatsApp de ${$json.business_name}. Responde como asistente comercial práctico para una PYME. No inventes precios, garantías, disponibilidad ni políticas. Si falta información, pide un solo dato claro. Si hay reclamo, urgencia, solicitud de humano, negociación compleja o tema sensible, marca handoff_required=true. Devuelve SOLO JSON válido con esta forma: ${JSON.stringify(schema)}.`;\nconst user = `Mensaje del cliente: ${$json.message_text}\\n\\nNombre detectado: ${$json.customer_name || 'No disponible'}\\nTeléfono: ${$json.customer_phone}\\n\\nFAQ/base disponible:\\n${$json.faq_context || 'Sin coincidencias exactas. Usa una respuesta general y pide el siguiente dato útil.'}\\n\\nSi no estás seguro, no inventes. Responde breve y orientado a avanzar la conversación.`;\nreturn [{ json: { ...$json, openai_payload: { model: $env.OPENAI_MODEL || 'gpt-4o-mini', temperature: 0.2, response_format: { type: 'json_object' }, messages: [ { role: 'system', content: system }, { role: 'user', content: user } ] } } }];"
+      },
+      "id": "d56e401e-1103-42b2-adda-7c09c0d90a96",
+      "name": "Build AI Response Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        30,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.OPENAI_BASE_URL || 'https://api.openai.com/v1/chat/completions' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.OPENAI_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.openai_payload) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "3e522725-36dc-4bd4-ada0-c8a4ed2fc541",
+      "name": "Draft Response with LLM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        270,
+        0
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "let ai = {};\ntry { const content = $json.choices?.[0]?.message?.content || $json.body?.choices?.[0]?.message?.content || ''; ai = typeof content === 'string' ? JSON.parse(content) : content; }\ncatch (e) { ai = { response_text: 'Gracias por escribirnos. Para ayudarte bien, dime por favor qué necesitas y tu nombre.', lead_stage: 'nuevo', urgency: 'media', handoff_required: true, handoff_reason: 'No se pudo interpretar la respuesta del modelo', missing_info: ['necesidad', 'nombre'] }; }\nconst original = $('Structured FAQ / Knowledge Base').item.json;\nconst text = String(ai.response_text || '').slice(0, 900).trim() || 'Gracias por escribirnos. ¿Me dices qué necesitas para poder ayudarte?';\nconst handoff = Boolean(ai.handoff_required) || Boolean(original.needs_owner_handoff_seed);\nreturn [{ json: { ...original, ai, response_text: text, lead_stage: ai.lead_stage || 'nuevo', lead_name: ai.lead_name || original.customer_name || '', lead_need: ai.lead_need || '', urgency: ai.urgency || 'media', handoff_required: handoff, handoff_reason: ai.handoff_reason || (original.needs_owner_handoff_seed ? 'Cliente pidió humano o usó palabra sensible' : '') } }];"
+      },
+      "id": "7f928494-c7d9-4925-b44c-38384956ce19",
+      "name": "Parse and Guardrail AI Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        520,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const row = { timestamp: $json.received_at || new Date().toISOString(), business_name: $env.BUSINESS_NAME || '', customer_phone: $json.customer_phone || '', customer_name: $json.lead_name || $json.customer_name || '', inbound_message: $json.message_text || '', response_text: $json.response_text || '', lead_stage: $json.lead_stage || '', lead_need: $json.lead_need || '', urgency: $json.urgency || '', handoff_required: String(Boolean($json.handoff_required)), handoff_reason: $json.handoff_reason || '', message_id: $json.message_id || '' };\nreturn [{ json: { ...$json, lead_log_row: row, lead_log_values: Object.values(row) } }];"
+      },
+      "id": "2bac4bd6-4fbd-4e2c-a685-da0b647102d9",
+      "name": "Build Lead Log Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        750,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ $env.SHEET_TAB || 'Leads' }}",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $json.lead_log_row.timestamp }}",
+            "business_name": "={{ $json.lead_log_row.business_name }}",
+            "customer_phone": "={{ $json.lead_log_row.customer_phone }}",
+            "customer_name": "={{ $json.lead_log_row.customer_name }}",
+            "inbound_message": "={{ $json.lead_log_row.inbound_message }}",
+            "response_text": "={{ $json.lead_log_row.response_text }}",
+            "lead_stage": "={{ $json.lead_log_row.lead_stage }}",
+            "lead_need": "={{ $json.lead_log_row.lead_need }}",
+            "urgency": "={{ $json.lead_log_row.urgency }}",
+            "handoff_required": "={{ $json.lead_log_row.handoff_required }}",
+            "handoff_reason": "={{ $json.lead_log_row.handoff_reason }}",
+            "message_id": "={{ $json.lead_log_row.message_id }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "7ccdbe35-5ebd-4ef6-b340-32521b156342",
+      "name": "Append Lead to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        990,
+        -150
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_WITH_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets OAuth2 - PLACEHOLDER"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.facebook.com/v23.0/' + ($json.phone_number_id || $env.META_PHONE_NUMBER_ID) + '/messages' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.META_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ messaging_product: 'whatsapp', to: $json.customer_phone, type: 'text', text: { preview_url: false, body: $json.response_text } }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "bc51066f-b780-4cdb-b511-6ce844226f88",
+      "name": "Send WhatsApp Reply via Meta",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        990,
+        110
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "handoff",
+              "leftValue": "={{ $json.handoff_required }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "d6d2d5ae-6f90-4850-87f0-0ddda50a190f",
+      "name": "Needs Owner Handoff?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.facebook.com/v23.0/' + ($json.phone_number_id || $env.META_PHONE_NUMBER_ID) + '/messages' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.META_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ messaging_product: 'whatsapp', to: $env.OWNER_WHATSAPP, type: 'text', text: { preview_url: false, body: `Nuevo lead necesita atención humana.\nCliente: ${$json.lead_name || $json.customer_name || 'Sin nombre'}\nTel: ${$json.customer_phone}\nUrgencia: ${$json.urgency}\nMotivo: ${$json.handoff_reason || 'Regla de escalamiento'}\nMensaje: ${$json.message_text}` } }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "a01ad0e1-4dda-4ffa-a09e-75715e78cc0b",
+      "name": "Notify Owner on WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1460,
+        -120
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { ok: true, message_id: $json.message_id, customer_phone: $json.customer_phone, lead_stage: $json.lead_stage, handoff_required: $json.handoff_required, logged: true, replied: true } }];"
+      },
+      "id": "3ad66b6a-0d9f-403b-94f1-10ea69474a68",
+      "name": "Build Internal Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1460,
+        150
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "ecaa4de1-0f49-41d1-b4d0-3f9f9c733709",
+      "name": "Workflow Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -900,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const err = $json.execution || $json; return [{ json: { text: `Error en workflow WhatsApp Agent (${ $env.BUSINESS_NAME || 'PYME' }). Revisa n8n. Execution: ${err.id || 'desconocida'}`, error: err } }];"
+      },
+      "id": "9d855ee3-0c68-43f4-b79c-7bdfe310241b",
+      "name": "Format Error Notification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -680,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.facebook.com/v23.0/' + $env.META_PHONE_NUMBER_ID + '/messages' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.META_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ messaging_product: 'whatsapp', to: $env.OWNER_WHATSAPP, type: 'text', text: { body: $json.text } }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "c6c52d14-4f2b-41a2-95c0-adf01d316499",
+      "name": "Notify Owner of Workflow Error",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -450,
+        520
+      ],
+      "continueOnFail": true
+    }
+  ],
+  "connections": {
+    "WhatsApp Inbound Webhook": {
+      "main": [
+        [
+          {
+            "node": "Respond 200 to Meta",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Normalize Meta WhatsApp Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Meta WhatsApp Payload": {
+      "main": [
+        [
+          {
+            "node": "Only Process Text Messages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Only Process Text Messages": {
+      "main": [
+        [
+          {
+            "node": "Structured FAQ / Knowledge Base",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Structured FAQ / Knowledge Base": {
+      "main": [
+        [
+          {
+            "node": "Build AI Response Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build AI Response Prompt": {
+      "main": [
+        [
+          {
+            "node": "Draft Response with LLM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Draft Response with LLM": {
+      "main": [
+        [
+          {
+            "node": "Parse and Guardrail AI Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse and Guardrail AI Output": {
+      "main": [
+        [
+          {
+            "node": "Build Lead Log Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Lead Log Row": {
+      "main": [
+        [
+          {
+            "node": "Append Lead to Google Sheets",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Send WhatsApp Reply via Meta",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Needs Owner Handoff?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Owner Handoff?": {
+      "main": [
+        [
+          {
+            "node": "Notify Owner on WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Internal Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify Owner on WhatsApp": {
+      "main": [
+        [
+          {
+            "node": "Build Internal Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Workflow Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Format Error Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Error Notification": {
+      "main": [
+        [
+          {
+            "node": "Notify Owner of Workflow Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "pinData": {},
+  "versionId": "template",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "createdBy": "KIRA",
+    "createdAt": "2026-06-17T01:12:42Z",
+    "notes": "Import template. Replace placeholder credentials and env vars before activation."
+  },
+  "tags": []
+}
